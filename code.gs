@@ -1,30 +1,40 @@
+function mapSingleFile(){
+  var file = DriveApp.getFileById('1V248G4p1ukXiFmzX3grNKwKswxe8TxED45yVD0TVgxc');
+  var details = GetFileInfo(file);
+  SendCompletionEmail(details, [FlattenFileInfo(details)]);
+}
+
 /***************************************************************************
                        Variables & Settings
 *****************************************************************************/
 
 //Date object marking the start of the execution
 var executionStart;
+
 //Marked true if the time limit is eceeded so the script knows to re-run itself
 var exceededMax = false;
+
 //Elapsed time updated each time a folder is opened
 var elapsedTime = 0;
-//The maximum allowed execution time in seconds
-var maxExecutionTime = 250;
 
 //Array of drive files used when generating a CSV/sheet
 var filesArray = [];
 
 //First row headers for the spreadsheet/CSV
-var spreadsheetColumnNames = [['Name', 'Type', 'Size', 'Path', 'URL', 'Created At','Last Updated At', 'Owner', 'Permissions', 'Editors Can Share', 'Viewers', 'Editors']];
+var spreadsheetColumnNames = [['Name', 'Type', 'Size', 'Path', 'URL', 'ID', 'Created At','Last Updated At', 'Is Trashed', 'Owner', 'Permissions', 'Editors Can Share', 'Viewers', 'Editors']];
+
+
+//The maximum allowed execution time in seconds
+var maxExecutionTime = 250;
 
 var settings = {
-  emailJson: true,
-  emailCsv: true,
-  saveJson: false,
-  saveSheet: false,
-  mapEntireDrive: true,
-  getSharedWithMe: true,
-  getTrashed: true
+  emailJson: true,       // Email an attached .JSON file
+  emailCsv: false,        // Email an attached .CSV file
+  saveJson: false,       // Save a .JSON file to google drive. Unused
+  saveSheet: false,      // Save a google sheet to google drive
+  mapEntireDrive: true,  // Map the entire drive or just one file, partially unused
+  getSharedWithMe: true, // Include files not owned by the user, but shared with them
+  getTrashed: true,      // Include files that are in the users trash
 }
 
 /***************************************************************************
@@ -70,7 +80,7 @@ function MapDrive() {
         structure['Trash'] = GetTrashedFiles();
       }
       
-      SendCompletionEmail(structure);
+      SendCompletionEmail(structure, filesArray);
       ClearTriggers();
     }
   } catch (e) {
@@ -92,21 +102,27 @@ function GetTrashedFiles(){
   return output;
 }
 
-function SendCompletionEmail(driveMap){
+//Sends the email with json or CSV data attached
+function SendCompletionEmail(driveMap, fileArray){
   var attachments= [];
   var body = 'Drive Map Attached.'
   
   if(settings.emailCsv){    
-    var csvData = GenerateCSV()
+    var csvData = GenerateCSV(fileArray)
     attachments.push(csvData.attachment);
-    body += ' ' + csvData.url;
+    
+    if(settings.saveSheet){
+      body += ' ' + csvData.url; //Append the sheet link to the email when we want to save it
+    }
   }
   
   if(settings.emailJson){
     var jsonBlob = CreateJSONBlob(driveMap);
     attachments.push(jsonBlob);
   }
-  MailApp.sendEmail(Session.getActiveUser().getEmail(), 'Mapped Drive Data', body ,{ attachments: attachments})
+  var today = FormatDate(new Date(), 'MM/dd/YYYY');
+  
+  MailApp.sendEmail(Session.getActiveUser().getEmail(), 'Mapped Drive Data ' + today, body ,{ attachments: attachments})
 }
 
 //Emails the completed map to the executing users email address
@@ -128,21 +144,35 @@ function CreateJSONBlob(data){
 }
 
 //Flattens the files array
-function GenerateCSV(){
-  var width = 12;
-  if(filesArray.length > 0){
-    var sheet = CreateGoogleSheet(width);
-    var csv = convertRangeToCsv(sheet.sheet.getRange(1,1, filesArray.length + 1, width));
+function GenerateCSV(fileArray){
+  var width = spreadsheetColumnNames[0].length;
+  
+  if(fileArray.length > 0){
+    var sheet = CreateGoogleSheet(width, fileArray);
+    var csv = convertRangeToCsv(sheet.sheet.getRange(1,1, fileArray.length + 1, width));
     var csvBlob = Utilities.newBlob(csv, ContentService.MimeType.CSV, 'DriveMap.csv');
+    
+    if(!settings.saveSheet){
+      DeleteGoogleSheet(sheet.sheet.getParent().getId()); //If we are not saving the sheet, delete it to avoid drive clutter
+      return {attachment: csvBlob};
+    }
+    
     return {attachment: csvBlob, url: sheet.url};
   }
 }
 
-function CreateGoogleSheet(width){
+//Creates a google sheet which enables us to create a CSV from the JSON data without worrying about complex RFC 4180 parsing
+function CreateGoogleSheet(width, fileArray){
   var sheet = SpreadsheetApp.create('Drive Map Output').insertSheet('Drive Map', 0);
   sheet.getRange(1, 1, 1, width).setValues(spreadsheetColumnNames);
-  sheet.getRange(2, 1, filesArray.length, width).setValues(filesArray);  
+  sheet.getRange(2, 1, fileArray.length, width).setValues(fileArray);  
   return {url: sheet.getParent().getUrl(), sheet: sheet};
+}
+
+
+function DeleteGoogleSheet(id){
+  var test = DriveApp.getFileById(id)
+  DriveApp.removeFile(test);
 }
 
 //Saves the current data
@@ -258,6 +288,7 @@ function IterateFileList(files, baseFolder){
   return output;
 }
 
+
 function GeneratePath(parents, baseFolder){
   var output = '';
   var parentsArray = [];
@@ -300,7 +331,7 @@ function FormatFilePath(names, isHTML){
   return output;
 }
 
-//Iterates through a list of fiels and gets their info
+//Iterates through a list of files and gets their info
 function GetFilesInfo(files, path){
   var output = [];
   while(files.hasNext()){
@@ -312,6 +343,9 @@ function GetFilesInfo(files, path){
 
 //Gets the info for a file
 function GetFileInfo(file, path){
+  if(!path){
+    path = "";
+  }
   var output = {};
   var owner = file.getOwner();
   output = {
@@ -320,8 +354,10 @@ function GetFileInfo(file, path){
       size: GetFileSize(file),
       path: path,
       url:  file.getUrl(),
+      id: file.getId(),
       created: file.getDateCreated(),
       lastUpdated: file.getLastUpdated(),
+      trashed: file.isTrashed(),
       owner: {
         name: owner.getName(),
         email: owner.getEmail()
@@ -341,7 +377,7 @@ function GetFileInfo(file, path){
 
 //Flattens a file info object
 function FlattenFileInfo(originalFileInfo){
-  var fileInfo = JSON.parse(JSON.stringify(originalFileInfo));
+  var fileInfo = JSON.parse(JSON.stringify(originalFileInfo)); //Copy object
   fileInfo.owner = fileInfo.owner.email;
   fileInfo.accessPermissions = fileInfo.permissions.accessPermissions;
   fileInfo.editorsCanShare = fileInfo.permissions.editorsCanShare;
@@ -353,6 +389,10 @@ function FlattenFileInfo(originalFileInfo){
     viewers = 'None'
   }
   for(var i = 0; i < fileInfo.permissions.viewers.length; i++){
+    if(fileInfo.permissions.viewers[i].email == ''){
+      continue; //Skip blank emails
+    }
+    
     if(i == fileInfo.permissions.viewers.length - 1){
       viewers += fileInfo.permissions.viewers[i].email;
     } else{
@@ -367,10 +407,14 @@ function FlattenFileInfo(originalFileInfo){
     editors = 'None'
   }  
   for(var i = 0; i < fileInfo.permissions.editors.length; i++){
+    if(fileInfo.permissions.editors[i].email == ''){
+      continue; //Skip blank emails
+    }
+    
     if(i == fileInfo.permissions.editors.length - 1){
-      viewers += fileInfo.permissions.editors[i].email;
+      editors += fileInfo.permissions.editors[i].email;
     } else{
-      viewers += fileInfo.permissions.editors[i].email + ', '
+      editors += fileInfo.permissions.editors[i].email + ', '
     }
   }  
   
@@ -621,3 +665,7 @@ function FormatDate(date, format)
   var output = Utilities.formatDate(temp, "PST", format);
   return output;
 }
+
+
+
+
